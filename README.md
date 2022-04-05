@@ -1,1 +1,1 @@
-# neuromoprhic-continual-learning
+# neuromorphic-continual-learning
