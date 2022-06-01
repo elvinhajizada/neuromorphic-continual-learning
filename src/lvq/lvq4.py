@@ -42,21 +42,23 @@ class LVQ4(object):
             ind = np.argmax(np.dot(self.prototypes, vector))
         return self.prototypes[ind], ind
 
-    def set_prototypes(self,  prototypes=None):
+    def set_prototypes(self, prototypes=None):
         self.prototypes = prototypes
 
     # Create a random proto vector
     def init_prototypes_from_data(self, data):
         self.prototypes = np.abs(
-            np.around(np.random.normal(np.mean(data, axis=0),
-                                       np.std(data, axis=0),
-                                       size=(self.n_protos, len(data[0]))), 1))
+                np.around(np.random.normal(np.mean(data, axis=0),
+                                           np.std(data, axis=0),
+                                           size=(self.n_protos, len(data[0]))),
+                          1))
         return self.prototypes
 
     # # Train a set of proto vectors
     def train_prototypes(self, x_train, y_train, x_test=None, y_test=None,
                          tau_alpha_dc=5, tau_alpha_gr=15, n_epochs=10,
-                         test_each_epoch=False, shuffle=True):
+                         max_allowed_mist=2, test_each_epoch=False,
+                         shuffle=True):
         np.set_printoptions(precision=2, suppress=True)
 
         alpha_dc = np.e ** (-1 / tau_alpha_dc)
@@ -64,46 +66,77 @@ class LVQ4(object):
         self.train_errors = np.zeros((n_epochs, 1))
         self.test_errors = np.zeros((n_epochs, 1))
 
-        print("Initial prototypes:\n", self.prototypes)
+        # print("Initial prototypes:\n", self.prototypes)
 
         for epoch in range(n_epochs):
             n_train_errors = 0
             if shuffle:
                 x_train, y_train = skutils.shuffle(x_train, y_train)
             for ind, vec in enumerate(x_train):
+                n_mistakes = 0
+                mistake = False
+                while True:
+                    bmu, bmu_ind = self.get_best_matching_unit(vec)
+                    error = vec - bmu
 
-                bmu, bmu_ind = self.get_best_matching_unit(vec)
-                error = vec - bmu
+                    if self.record_pt_evolve:
+                        self.proto_evolve[bmu_ind].append(
+                                [epoch, bmu.copy()])
 
-                if self.record_pt_evolve:
-                    self.proto_evolve[bmu_ind].append([epoch, bmu.copy()])
+                    # If winner not assigned to a label, then assign it to
+                    # the training instance's label
+                    if self.proto_labels[bmu_ind] == -1:
+                        mistake = False
+                        self.proto_labels[bmu_ind] = y_train[ind]
+                        self.alphas[bmu_ind] = alpha_dc * self.alphas[
+                            bmu_ind]
 
-                # If winner not assigned to a label, then assign it to the
-                # training instance's label
-                if self.proto_labels[bmu_ind] == -1:
-                    self.proto_labels[bmu_ind] = y_train[ind]
-                    self.alphas[bmu_ind] = alpha_dc * self.alphas[bmu_ind]
+                    # Update the winner based on its inference
+                    if self.proto_labels[bmu_ind] == y_train[ind]:
+                        mistake = False
+                        self.prototypes[bmu_ind] += self.alphas[
+                                                        bmu_ind] * error
+                        self.alphas[bmu_ind] = alpha_dc * self.alphas[
+                            bmu_ind]
+                    else:
+                        mistake = True
+                        n_mistakes += 1
+                        self.prototypes[bmu_ind] -= self.alphas[bmu_ind] * vec
+                        self.alphas[bmu_ind] = min((self.alphas[bmu_ind] *
+                                                    alpha_gr),
+                                                   self.alpha_start)
+                        n_train_errors += 1
 
-                # Update the winner based on its inference
-                if self.proto_labels[bmu_ind] == y_train[ind]:
-                    self.prototypes[bmu_ind] += self.alphas[epoch] * error
-                    self.alphas[bmu_ind] = alpha_dc * self.alphas[bmu_ind]
-                else:
-                    self.prototypes[bmu_ind] -= self.alphas[epoch] * vec
-                    self.alphas[bmu_ind] = min((self.alphas[bmu_ind] *
-                                               alpha_gr), self.alpha_start)
-                    n_train_errors += 1
+                    # Bound weights between [w_min, w_max]
+                    self.prototypes[bmu_ind][self.prototypes[bmu_ind] >
+                                             self.w_max] = self.w_max
 
-                # Bound weights between [w_min, w_max]
-                self.prototypes[bmu_ind][self.prototypes[bmu_ind] >
-                                         self.w_max] = self.w_max
+                    self.prototypes[bmu_ind][self.prototypes[bmu_ind] <
+                                             self.w_min] = self.w_min
 
-                self.prototypes[bmu_ind][self.prototypes[bmu_ind] <
-                                         self.w_min] = self.w_min
+                    if self.rec_alpha_evolve:
+                        for i in range(self.n_protos):
+                            self.alpha_evolve[i].append(self.alphas[i])
 
-                if self.rec_alpha_evolve:
-                    for i in range(self.n_protos):
-                        self.alpha_evolve[i].append(self.alphas[i])
+                    if mistake and n_mistakes == 1:
+                        n_train_errors += 1
+                        # print("First Mistake:", self.proto_labels[bmu_ind])
+                        continue
+                    elif mistake and n_mistakes <= max_allowed_mist:
+                        # print("Second Mistake:", self.proto_labels[bmu_ind])
+                        continue
+                    elif mistake and n_mistakes == (max_allowed_mist + 1):
+                        # print("New Proto:", self.proto_labels[bmu_ind])
+                        # Allocate a new non-winning prototype
+                        next_proto_ind = np.where(self.proto_labels == -1)[0][0]
+                        self.proto_labels[next_proto_ind] = y_train[ind]
+                        error = vec - self.prototypes[next_proto_ind]
+                        self.prototypes[next_proto_ind] += self.alphas[
+                                                        next_proto_ind] * error
+                        self.alphas[next_proto_ind] = alpha_dc * self.alphas[
+                            bmu_ind]
+                    else:
+                        break
 
             # Test each epoch if the corresponding flag is True
             if test_each_epoch or epoch == (n_epochs - 1):
