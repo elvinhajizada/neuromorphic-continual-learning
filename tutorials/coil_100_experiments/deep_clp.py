@@ -38,8 +38,13 @@ from clp.clp import CLP
 
 
 def main():
-
-    dataset_dir = 'C:/Users/ehajizad/Projects/data/coil-100'
+    
+    # root_dir = 'C:/Users/ehajizad/lava-nc/neuromorphic-continual-learning'
+    # dataset_dir = 'C:/Users/ehajizad/Projects/data/coil-100'
+    
+    root_dir = '/home/ehajizad/ss_learning/neuromorphic-continual-learning'
+    dataset_dir = '/home/ehajizad/ss_learning/ssl_tests/datasets/coil-100'
+    
     dataset = Coil100Dataset(root_dir=dataset_dir, transform=None)
 
     train_ds = Coil100Dataset(root_dir=dataset_dir,
@@ -75,17 +80,32 @@ def main():
     model = model.to(device)
 
     model.load_state_dict(torch.load(
-            "C:/Users/ehajizad/lava-nc/neuromorphic-continual-learning/models"
-            "/coil100_barlow_twins_modified_resnet9.pth",
-            map_location=torch.device('cpu')))
+            root_dir+"/models/coil100_barlow_twins_modified_resnet9.pth",
+            map_location=device))
     model = model.backbone[0:-1]
     model.eval()
 
-    embeddings = np.load(
-            "C:/Users/ehajizad/lava-nc/neuromorphic-continual-learning/embeddings/coil100_bt_resnet_embeddings.npz")
-    X = torch.from_numpy(embeddings["X"])
-    y = torch.from_numpy(embeddings["y"])
-
+    # embeddings = np.load(
+    #         root_dir+"/embeddings/coil100_bt_resnet_embeddings.npz")
+    # X = torch.from_numpy(embeddings["X"])
+    # y = torch.from_numpy(embeddings["y"])
+    
+    # Generate embedding
+    
+    feat_ext_dl = DataLoader(train_ds, batch_size=1, shuffle=False, num_workers=4)
+    
+    embeddings = []
+    with torch.no_grad():
+        for batch in feat_ext_dl:
+            image, label = batch 
+            # print("Before data:", torch.cuda.memory_allocated(device)/1e9)
+            image, label = image.to(device), label.to(device)
+            emb = model(image).flatten(start_dim=1)
+            embeddings.append(emb)
+        
+    embeddings = torch.cat(embeddings, 0)
+    
+    
     eval_plugin = EvaluationPlugin(
             accuracy_metrics(epoch=True, experience=True, stream=True),
             forgetting_metrics(experience=True, stream=True),
@@ -104,7 +124,7 @@ def main():
                tau_alpha_decay=18,
                tau_alpha_growth=18,
                max_allowed_mistakes=1,
-               input_size=X.shape[1],
+               input_size=embeddings.shape[1],
                num_classes=100,
                eval_mb_size=2,
                train_mb_size=2,
@@ -112,7 +132,7 @@ def main():
                device=device,
                evaluator=eval_plugin)
 
-    clvq.init_prototypes_from_data(X)
+    clvq.init_prototypes_from_data(embeddings)
 
     # TRAINING LOOP
     print("Starting experiment...")
