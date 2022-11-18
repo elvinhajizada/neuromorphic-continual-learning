@@ -1,5 +1,9 @@
 import lightly
 from lightly.models.modules import BarlowTwinsProjectionHead
+from lightly.data import SimCLRCollateFunction
+from lightly.loss import NegativeCosineSimilarity
+from lightly.models.modules import SimSiamProjectionHead
+from lightly.models.modules import SimSiamPredictionHead
 
 import torch.distributed as dist
 from torch import nn
@@ -17,6 +21,19 @@ class BarlowTwins(nn.Module):
         z = self.projection_head(x)
         return z
 
+class SimSiam(nn.Module):
+    def __init__(self, backbone):
+        super().__init__()
+        self.backbone = backbone
+        self.projection_head = SimSiamProjectionHead(512, 512, 128)
+        self.prediction_head = SimSiamPredictionHead(128, 64, 128)
+
+    def forward(self, x):
+        f = self.backbone(x).flatten(start_dim=1)
+        z = self.projection_head(f)
+        p = self.prediction_head(z)
+        z = z.detach()
+        return z, p
 
 class ModifiedBarlowTwinsLoss(torch.nn.Module):
     """Implementation of the Barlow Twins Loss from Barlow Twins[0] paper.

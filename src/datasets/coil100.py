@@ -14,7 +14,7 @@ from avalanche.benchmarks.datasets.downloadable_dataset import SimpleDownloadabl
 
 
 class Coil100Dataset(Dataset):
-    def __init__(self, root_dir, transform=None, size=64, train=True,
+    def __init__(self, root_dir, obj_list=np.arange(100), transform=None, size=64, train=True,
                  test_size=0.2, seed=1234):
         """
         this function builds a data frame which contains the path to image
@@ -38,12 +38,24 @@ class Coil100Dataset(Dataset):
 
         self.targets = np.array(self.targets)
         self.paths = np.array(self.paths)
+        
+        sorted_inds = np.argsort(self.targets)
+        self.targets = self.targets[sorted_inds]
+        self.paths = self.paths[sorted_inds]
+        
+        obj_slices = np.concatenate([np.arange(ind*72,(ind+1)*72) for ind in obj_list])
+        n_classes = len(obj_list)
+        # self.targets = self.targets[obj_slices]
+        self.targets = self.targets[:72*n_classes]
+        self.paths = self.paths[obj_slices]
+        
         train_indices, test_indices, _, _ = train_test_split(
             range(len(self.targets)),
             self.targets,
             stratify=self.targets,
             test_size=test_size,
-            random_state=seed)
+            random_state=seed,
+            shuffle=True)
         if train:
             self.targets = self.targets[train_indices]
             self.paths = self.paths[train_indices]

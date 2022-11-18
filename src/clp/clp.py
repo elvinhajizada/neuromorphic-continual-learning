@@ -6,6 +6,8 @@ import os
 import torch
 from torchmetrics.functional import pairwise_cosine_similarity
 from torch.nn.functional import one_hot
+from torch.linalg import norm
+
 
 
 from avalanche.training.plugins import SupervisedPlugin
@@ -35,6 +37,9 @@ class CLP(SupervisedTemplate):
             alpha_start,
             tau_alpha_decay,
             tau_alpha_growth,
+            sim_th,
+            w_max,
+            w_min,
             input_size,
             num_classes,
             max_allowed_mistakes,
@@ -91,7 +96,9 @@ class CLP(SupervisedTemplate):
                 evaluator=evaluator,
                 eval_every=eval_every,
         )
-
+        
+        self.device = device
+        
         # CLVQ parameters
         self.bmu_metric = bmu_metric
         self.alpha_start = alpha_start
@@ -99,20 +106,23 @@ class CLP(SupervisedTemplate):
         self.alpha_gr = np.e ** (-1 / tau_alpha_growth)
         self.max_allowed_mistakes = max_allowed_mistakes
         self.num_classes = num_classes
-
+        self.sim_th = sim_th
+        self.w_max = w_max
+        self.w_min = w_min
+        
         # setup weights for CLVQ
         self.n_protos = n_protos
-        self.prototypes = torch.zeros(n_protos, input_size)
+        self.prototypes = torch.zeros(n_protos, input_size).to(device)
         self.proto_labels = num_classes * torch.ones((n_protos, 1), dtype=int)
         self.alphas = torch.ones((n_protos, 1)).to(self.device)
-        self.w_max = 350
-        self.w_min = 0
+        self.sims = []
 
     def forward(self, return_features=False):
         """Compute the model's output given the current mini-batch."""
         self.model.eval()
         feat = self.model(self.mb_x).flatten(start_dim=1, end_dim=-1)
-        out = one_hot(self.predict(feat), self.num_classes+1).squeeze(1).float()
+        out = one_hot(self.predict(feat), self.num_classes+1).squeeze(1).float().to(self.device)
+        
         if return_features:
             return out, feat
         else:
@@ -128,7 +138,7 @@ class CLP(SupervisedTemplate):
             self._unpack_minibatch()
             self._before_training_iteration(**kwargs)
 
-            self.loss = torch.tensor([1], dtype=float)
+            self.loss = torch.tensor([1], dtype=float).to(self.device)
 
             # Forward
             self._before_forward(**kwargs)
@@ -137,14 +147,14 @@ class CLP(SupervisedTemplate):
             self._after_forward(**kwargs)
 
             # Loss & Backward
-            self.loss += self._criterion(self.mb_output, self.mb_y)
-            # self.loss += 1
+            # self.loss += self._criterion(self.mb_output, self.mb_y)
+            self.loss += 1
 
             # Optimization step
             self._before_update(**kwargs)
             # process one element at a time
             for f, y in zip(feats, self.mb_y):
-                f = f.squeeze()
+                # f = f.squeeze()
                 self.fit(f, y.unsqueeze(0))
             self._after_update(**kwargs)
 
@@ -167,74 +177,101 @@ class CLP(SupervisedTemplate):
         mistake = False
         y = torch.tensor(int(y))
         while True:
+            
             bmu, bmu_ind = self.get_best_matching_unit(x)
-            error = x - bmu
-            # print("winner id: ", bmu_ind, "error: ", np.mean(error))
-
+            
+            # Novel instance --> Allocate
+            # if no winner, because all similarities are below the given threshold, then allocate
+            if bmu_ind == None:
+                self._allocate(x, y)
+                break
+            
+            # Novel label --> Allocate
+            if y not in self.proto_labels:
+                self._allocate(x, y)
+                break
+                
+            # Calculate Error
+            if self.bmu_metric == 'euclidean':
+                error = x - bmu
+                
+            elif self.bmu_metric == 'cosine':
+                bmu_n = norm(bmu, 2)
+                x_n = norm(x, 2)
+                error = bmu_n * x_n * (x / (bmu_n * x_n) - torch.dot(bmu.squeeze(), x)/(bmu_n**3 * x_n)*bmu)
+                
+            # print("winner label: ", self.proto_labels[bmu_ind])
+            # print("Target label: ", y)
+            
             # If winner not assigned to a label, then assign it to
             # the training instance's label
             if self.proto_labels[bmu_ind] == self.num_classes:
+                # print("Unsupervised llocating...")
                 mistake = False
                 self.proto_labels[bmu_ind] = y
+                self.prototypes[bmu_ind] += self.alphas[bmu_ind] * error
                 self.alphas[bmu_ind] = self.alpha_dc * self.alphas[bmu_ind]
+                # self._bound_weights(bmu_ind)
+                break
 
             # Update the winner based on its inference
             # If CORRECT prediction
-            if self.proto_labels[bmu_ind] == y:
+            elif self.proto_labels[bmu_ind] == y:
                 mistake = False
                 # print("Correct")
-
+                # print(self.alphas[bmu_ind])
                 self.prototypes[bmu_ind] += self.alphas[bmu_ind] * error
                 self.alphas[bmu_ind] = self.alpha_dc * self.alphas[bmu_ind]
+                # self._bound_weights(bmu_ind)
+                break
 
-            # if INCORRECT prediction
+            # if INCORRECT prediction 
             else:
                 # print("Mistake")
                 mistake = True
                 n_mistakes += 1
-                # print(self.alphas[bmu_ind])
-                self.prototypes[bmu_ind] -= self.alphas[bmu_ind] * x
+                self.prototypes[bmu_ind] -= self.alphas[bmu_ind] * error
                 self.alphas[bmu_ind] = min(
                         (self.alphas[bmu_ind] * self.alpha_gr),
                         self.alpha_start)
-                # n_train_errors += 1
-                # print("After update: ", self.prototypes[bmu_ind])
+                
+                # self._bound_weights(bmu_ind)
 
-            # Bound weights between [w_min, w_max]
-            # self.prototypes[bmu_ind][self.prototypes[bmu_ind] >
-            #                          self.w_max] = self.w_max
-            #
-            # self.prototypes[bmu_ind][self.prototypes[bmu_ind] <
-            #                          self.w_min] = self.w_min
 
-            # if self.rec_alpha_evolve:
-            #     for i in range(self.n_protos):
-            #         self.alpha_evolve[i].append(self.alphas[i])
+                if n_mistakes < self.max_allowed_mistakes:
+                    # print("First Mistake trying again...")
+                    continue
 
-            if mistake and n_mistakes == 1:
-                # n_train_errors += 1
-                # print("First Mistake:", self.proto_labels[bmu_ind])
-                continue
-
-            elif mistake and n_mistakes <= self.max_allowed_mistakes:
-                # print("Second Mistake:", self.proto_labels[bmu_ind])
-                continue
-
-            # Allocate a new non-winning prototype if maximum number of allowed
-            # mistakes are passed
-            elif mistake and n_mistakes == (self.max_allowed_mistakes + 1):
-
-                next_proto_ind = np.where(self.proto_labels == self.num_classes)[0][0]
-                self.proto_labels[next_proto_ind] = y
-                error = x - self.prototypes[next_proto_ind]
-                self.prototypes[next_proto_ind] += self.alphas[
-                                                       next_proto_ind] * error
-                self.alphas[next_proto_ind] = self.alpha_dc * self.alphas[
-                    bmu_ind]
-                # print("New Proto:", next_proto_ind)
-            else:
-                break
-
+                # Allocate a new non-winning prototype if maximum number of allowed
+                # mistakes are passed
+                elif n_mistakes == self.max_allowed_mistakes:
+                    self._allocate(x, y)
+                    break
+    
+    def _allocate (self, x, y):
+        # print("Mistake again, allocating...")
+        similarities = self._calc_similarities(x)
+        similarities[self.proto_labels<self.num_classes] -= 100000
+        bmu_ind = torch.argmax(similarities, dim=0)
+        self.proto_labels[bmu_ind] = y
+        error = x - self.prototypes[bmu_ind]
+        self.prototypes[bmu_ind] += self.alphas[bmu_ind] * error
+        self.alphas[bmu_ind] = self.alpha_dc * self.alphas[bmu_ind]
+        # self._bound_weights(bmu_ind)
+        
+    def _bound_weights(self, bmu_ind):
+        over_w_max_inds = (self.prototypes[bmu_ind] > self.w_max)
+        below_w_min_inds = (self.prototypes[bmu_ind] < self.w_min)
+        
+        if torch.count_nonzero(over_w_max_inds) > 0:
+            inds = over_w_max_inds.nonzero().squeeze()
+            print(inds)
+            self.prototypes[bmu_ind][inds] = self.w_max
+        if torch.count_nonzero(below_w_min_inds) > 0:    
+            inds = below_w_min_inds.nonzero().squeeze()
+            print(inds)
+            self.prototypes[bmu_ind][inds] = self.w_min
+        
     @torch.no_grad()
     def predict(self, x):
         """
@@ -258,27 +295,76 @@ class CLP(SupervisedTemplate):
     def get_best_matching_unit(self, x):
 
         ind = 0
-
+        
+        similarities = self._calc_similarities(x)
+        
+        (max_sim, ind) = torch.max(similarities, dim=0, keepdim=False)
+        self.sims.append(max_sim)
+        if torch.count_nonzero(max_sim>self.sim_th) == 0:
+                return None, None
+        else:
+            return self.prototypes[ind], ind
+            
+#         if self.bmu_metric == 'euclidean':
+#             euc_dist = torch.cdist(self.prototypes, x, p=2)
+#             (min_dist, ind) = torch.min(euc_dist, dim=0, keepdim=False)
+#             self.sims.append(min_dist)
+#             if torch.count_nonzero(min_dist > self.sim_th) > 0:
+#                 return None, None
+            
+#         elif self.bmu_metric == 'dot_product':
+#             dp = torch.mm(self.prototypes, x.T)
+#             if torch.count_nonzero(dp>self.sim_th) > 0:
+#                 ind = torch.argmax(dp, dim=0)
+#                 self.sims.append(torch.max(dp, dim=0))
+#             else:
+#                 return None, None
+            
+#         elif self.bmu_metric == 'cosine':
+#             ind = torch.argmax(pairwise_cosine_similarity(self.prototypes, x),
+#                                dim=0)
+        
+        
+    
+    def _calc_similarities(self, x):
+        
+        similarities = 0
+        
         if len(x.shape) == 1:
             x = x.unsqueeze(dim=0)
 
         if self.bmu_metric == 'euclidean':
-            ind = torch.argmin(torch.cdist(self.prototypes, x, p=2), dim=0)
+            similarities = -torch.cdist(self.prototypes, x, p=2)
+            
         elif self.bmu_metric == 'dot_product':
-            ind = torch.argmax(torch.mm(self.prototypes, x.T), dim=0)
+            similarities = torch.mm(self.prototypes, x.T)          
+            
         elif self.bmu_metric == 'cosine':
-            ind = torch.argmax(pairwise_cosine_similarity(self.prototypes, x),
-                               dim=0)
-
-        return self.prototypes[ind], ind
+            similarities = pairwise_cosine_similarity(self.prototypes, x)
+            
+        return similarities
 
     def init_prototypes_from_data(self, data):
-        torch.abs(torch.round(
-            torch.normal(mean=torch.mean(data, axis=0).tile(self.n_protos, 1),
-                         std=torch.std(data, axis=0).tile(self.n_protos, 1),
-                         out=self.prototypes), decimals=1))
+        
+        num_bins = 100
+        x = data[0,:].cpu()
+        x[np.absolute(x)<0.02]=0
+
+        counts, bins = np.histogram(x, bins=num_bins)
+        bins = bins[:-1]
+        probs = counts/float(counts.sum())
+        
+        self.prototypes = torch.tensor(np.random.choice(bins, size=(self.n_protos, data.shape[1]), replace=True, p=probs)).to(self.device)
+        # torch.abs(torch.round(
+        #     torch.normal(mean=torch.mean(data, axis=0).tile(self.n_protos, 1),
+        #                  std=torch.std(data, axis=0).tile(self.n_protos, 1),
+        #                  out=self.prototypes), decimals=1))
 
         return self.prototypes
+    
+    def criterion(self):
+        """Loss function."""
+        return 0
 
     def fit_base(self, X, y):
         """
