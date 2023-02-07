@@ -17,15 +17,7 @@ from avalanche.models import FeatureExtractorBackbone
 
 
 class CLP(SupervisedTemplate):
-    """Deep Streaming Linear Discriminant Analysis.
-
-    This strategy does not use backpropagation.
-    Minibatches are first passed to the pretrained feature extractor.
-    The result is processed one element at a time to fit the LDA.
-    Original paper:
-    "Hayes et. al., Lifelong Machine Learning with Deep Streaming Linear
-    Discriminant Analysis, CVPR Workshop, 2020"
-    https://openaccess.thecvf.com/content_CVPRW_2020/papers/w15/Hayes_Lifelong_Machine_Learning_With_Deep_Streaming_Linear_Discriminant_Analysis_CVPRW_2020_paper.pdf
+    """Continually Learning Prototypes.
     """
 
     def __init__(
@@ -52,9 +44,9 @@ class CLP(SupervisedTemplate):
             evaluator=default_evaluator,
             eval_every=-1,
     ):
-        """Init function for the SLDA model.
+        """Init function for the CLP model.
 
-        :param slda_model: a PyTorch model
+        :param clp_model: a PyTorch model
         :param criterion: loss function
         :param output_layer_name: if not None, wrap model to retrieve
             only the `output_layer_name` output. If None, the strategy
@@ -115,6 +107,7 @@ class CLP(SupervisedTemplate):
         self.prototypes = torch.zeros(n_protos, input_size).to(device)
         self.proto_labels = num_classes * torch.ones((n_protos, 1), dtype=int)
         self.alphas = torch.ones((n_protos, 1)).to(self.device)
+        self.n_alc_bc_miss = 0    # Num of allocated protos because of errors
         self.sims = []
 
     def forward(self, return_features=False):
@@ -178,19 +171,22 @@ class CLP(SupervisedTemplate):
         y = torch.tensor(int(y))
         while True:
             
-            bmu, bmu_ind = self.get_best_matching_unit(x)
+            bmu_ind = self.get_best_matching_unit(x)
             
             # Novel instance --> Allocate
             # if no winner, because all similarities are below the given threshold, then allocate
-            if bmu_ind == None:
+            if bmu_ind == -1:
                 self._allocate(x, y)
                 break
             
-            # Novel label --> Allocate
-            if y not in self.proto_labels:
-                self._allocate(x, y)
-                break
+            # # Novel label --> Allocate
+            # if y not in self.proto_labels:
+            #     self._allocate(x, y)
+            #     break
                 
+            # Get the winner prototype
+            bmu = self.prototypes[bmu_ind]
+            
             # Calculate Error
             if self.bmu_metric == 'euclidean':
                 error = x - bmu
@@ -245,6 +241,7 @@ class CLP(SupervisedTemplate):
                 # Allocate a new non-winning prototype if maximum number of allowed
                 # mistakes are passed
                 elif n_mistakes == self.max_allowed_mistakes:
+                    self.n_alc_bc_miss += 1
                     self._allocate(x, y)
                     break
     
@@ -258,7 +255,7 @@ class CLP(SupervisedTemplate):
         self.prototypes[bmu_ind] += self.alphas[bmu_ind] * error
         self.alphas[bmu_ind] = self.alpha_dc * self.alphas[bmu_ind]
         # self._bound_weights(bmu_ind)
-        
+    
     def _bound_weights(self, bmu_ind):
         over_w_max_inds = (self.prototypes[bmu_ind] > self.w_max)
         below_w_min_inds = (self.prototypes[bmu_ind] < self.w_min)
@@ -283,11 +280,12 @@ class CLP(SupervisedTemplate):
         """
 
         # Compute the winner prototype, return this and its index
-        bmu, bmu_ind = self.get_best_matching_unit(x)
-
+        bmu_inds = self.get_best_matching_unit(x) 
         # Find the predicted labels
-        preds = self.proto_labels[bmu_ind]
-
+        preds = self.proto_labels[bmu_inds]
+        # Infer "Unknown Instance" label (as label == n_classes) as predictions
+        preds[bmu_inds==-1] = self.num_classes
+        
         # return predictions
         return preds
 
@@ -298,12 +296,12 @@ class CLP(SupervisedTemplate):
         
         similarities = self._calc_similarities(x)
         
-        (max_sim, ind) = torch.max(similarities, dim=0, keepdim=False)
+        (max_sim, bmu_inds) = torch.max(similarities, dim=0, keepdim=False)
         self.sims.append(max_sim)
-        if torch.count_nonzero(max_sim>self.sim_th) == 0:
-                return None, None
-        else:
-            return self.prototypes[ind], ind
+        
+        bmu_inds[torch.count_nonzero(max_sim>self.sim_th) == 0] = -1
+        
+        return bmu_inds
             
 #         if self.bmu_metric == 'euclidean':
 #             euc_dist = torch.cdist(self.prototypes, x, p=2)
