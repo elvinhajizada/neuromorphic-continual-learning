@@ -30,6 +30,8 @@ class CLP(SupervisedTemplate):
             input_size,
             num_classes,
             max_allowed_mistakes,
+            k_hit=0.7,
+            k_miss=3,
             verbose = 0,
             output_layer_name=None,
             train_epochs: int = 1,
@@ -94,6 +96,8 @@ class CLP(SupervisedTemplate):
         self.num_classes = num_classes
         self.sim_th = sim_th
         self.verbose = verbose
+        self.k_hit = k_hit
+        self.k_miss = k_miss
         
         # setup weights for CLVQ
         self.n_protos = n_protos
@@ -166,20 +170,24 @@ class CLP(SupervisedTemplate):
         n_mistakes = 0
         mistake = False
         y = torch.tensor(int(y))
+        x = x / norm(x, 2)
+        
         while True:
             
             bmu_ind = self.get_best_matching_unit(x).item()
             
             if y.item() not in self.seen_labels:
                 self.seen_labels.append(y.item())
-                print("Novel Label!")
+                if self.verbose == 1:
+                    print("Novel Label!")
                 self._allocate(x, y)
                 break
                 
             # Novel instance --> Allocate
             # if no winner, because all similarities are below the given threshold, then allocate
             if bmu_ind == -1:
-                print("Novel Instance!")
+                if self.verbose == 1:
+                    print("Novel Instance!")
                 self._allocate(x, y)
                 self.mistaken_proto_inds = []  # reset mistake buffer
                 break
@@ -197,9 +205,7 @@ class CLP(SupervisedTemplate):
                 error = x - bmu
                 
             elif self.bmu_metric == 'cosine':
-                bmu_n = norm(bmu, 2)
-                x_n = norm(x, 2)
-                error = bmu_n * x_n * (x / (bmu_n * x_n) - torch.dot(bmu.squeeze(), x)/(bmu_n**3 * x_n)*bmu)
+                error = x
                 
             # print("winner label: ", self.proto_labels[bmu_ind])
             # print("Target label: ", y)
@@ -207,7 +213,8 @@ class CLP(SupervisedTemplate):
             # If winner not assigned to a label, then assign it to
             # the training instance's label
             if self.proto_labels[bmu_ind] == self.num_classes:
-                print("Unsupervised allocating...")
+                if self.verbose == 1:
+                    print("Unsupervised allocating...")
                 mistake = False
                 self.proto_labels[bmu_ind] = y
                 self.prototypes[bmu_ind] += self.alphas[bmu_ind] * error
@@ -221,11 +228,11 @@ class CLP(SupervisedTemplate):
             # If CORRECT prediction
             elif self.proto_labels[bmu_ind] == y:
                 mistake = False
-                if self.verbose == 1:
+                if self.verbose == 2:
                     print("Correct")
                 # print(self.alphas[bmu_ind])
                 self.prototypes[bmu_ind] += self.alphas[bmu_ind] * error
-                self.hits[bmu_ind]+=0.7
+                self.hits[bmu_ind]+=self.k_hit
                 self.alphas[bmu_ind] = self.misses[bmu_ind]/self.hits[bmu_ind]
                 # self._bound_weights(bmu_ind)
                 self.mistaken_proto_inds = []
@@ -236,10 +243,11 @@ class CLP(SupervisedTemplate):
                 # print("Mistake")
                 mistake = True
                 n_mistakes += 1
-                print("Mistaken prototype:", self.proto_labels[bmu_ind], bmu_ind)
+                if self.verbose == 1:
+                    print("Mistaken prototype:", self.proto_labels[bmu_ind], bmu_ind)
                 self.mistaken_proto_inds.append(bmu_ind)
                 self.prototypes[bmu_ind] -= self.alphas[bmu_ind] * error
-                self.misses[bmu_ind] += 5
+                self.misses[bmu_ind] += self.k_miss
                 self.alphas[bmu_ind] = self.misses[bmu_ind]/self.hits[bmu_ind]
                 
                 # If more misses than hits, then forget this prototype, reset it
@@ -259,7 +267,8 @@ class CLP(SupervisedTemplate):
                 # Allocate a new non-winning prototype if maximum number of allowed
                 # mistakes are passed
                 elif n_mistakes == self.max_allowed_mistakes:
-                    print("Ignoring the instance")
+                    if self.verbose == 1:
+                        print("Ignoring the instance")
                     self.n_alc_bc_miss += 1
                     self.mistaken_proto_inds = []
                     # self._allocate(x, y)
@@ -323,7 +332,7 @@ class CLP(SupervisedTemplate):
         top_sims, top_inds = torch.sort(sims, 0, descending=True)
         top_sims, top_inds = top_sims[:8,0], top_inds[:8,0]
         # print(top_sims.shape, top_inds.shape)
-        if self.verbose == 1:
+        if self.verbose == 2:
             print("-----------------------------------------------------------")
             print("sims:  ",top_sims.t().data)
             print("labels:",self.proto_labels[top_inds].t().data)
