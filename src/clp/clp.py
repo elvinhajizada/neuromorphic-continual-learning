@@ -32,6 +32,8 @@ class CLP(SupervisedTemplate):
             max_allowed_mistakes,
             k_hit=0.7,
             k_miss=3,
+            sim_th_tau_crr=100,
+            sim_th_tau_err=40,
             eps=0.03,
             verbose = 0,
             output_layer_name=None,
@@ -42,6 +44,7 @@ class CLP(SupervisedTemplate):
             plugins: Optional[Sequence["SupervisedPlugin"]] = None,
             evaluator=default_evaluator,
             eval_every=-1,
+            ext_feat=True
     ):
         """Init function for the CLP model.
 
@@ -68,8 +71,11 @@ class CLP(SupervisedTemplate):
 
         if plugins is None:
             plugins = []
-
-        clvq_model = clvq_model.eval()
+        
+        self.ext_feat = ext_feat
+        
+        clvq_model.eval()
+            
         if output_layer_name is not None:
             clvq_model = FeatureExtractorBackbone(
                     clvq_model.to(device), output_layer_name
@@ -90,6 +96,7 @@ class CLP(SupervisedTemplate):
         
         self.device = device
         
+        
         # CLVQ parameters
         self.bmu_metric = bmu_metric
         self.alpha_start = alpha_start
@@ -98,11 +105,13 @@ class CLP(SupervisedTemplate):
         self.verbose = verbose
         self.k_hit = k_hit
         self.k_miss = k_miss
+        self.sim_th_tau_crr = sim_th_tau_crr
+        self.sim_th_tau_err = sim_th_tau_err
         self.eps = eps
         
         # setup weights for CLVQ
         self.n_protos = n_protos
-        self.prototypes = torch.zeros(n_protos, input_size).to(self.device)
+        self.prototypes = 100*torch.ones(n_protos, input_size).to(self.device)
         self.proto_labels = num_classes * torch.ones((n_protos, 1), dtype=int)
         self.alphas = self.alpha_start*torch.ones((n_protos, 1)).to(self.device)
         self.sim_th = sim_th*torch.ones((n_protos, 1)).to(self.device)
@@ -116,14 +125,18 @@ class CLP(SupervisedTemplate):
     def forward(self, return_features=False):
         """Compute the model's output given the current mini-batch."""
         self.model.eval()
-        feat = self.model(self.mb_x).flatten(start_dim=1, end_dim=-1)
+        if self.ext_feat:         
+            feat = self.model(self.mb_x).flatten(start_dim=1, end_dim=-1)
+        else:
+            feat = self.mb_x.float()
+        
         out = one_hot(self.predict(feat), self.num_classes+1).squeeze(1).float().to(self.device)
         
         if return_features:
             return out, feat
         else:
             return out
-
+        
     def training_epoch(self, **kwargs):
         """
         Training epoch.
@@ -192,6 +205,7 @@ class CLP(SupervisedTemplate):
             if bmu_ind == -1:
                 if self.verbose >= 1:
                     print("Novel Instance!")
+                    print(max_sim, bmu_ind)
                 self._allocate(x, y)
                 self.mistaken_proto_inds = []  # reset mistake buffer
                 break
@@ -224,7 +238,7 @@ class CLP(SupervisedTemplate):
                 self.prototypes[bmu_ind] += self.alphas[bmu_ind] * error
                 
                 # update the threshold towards max_sim-eps
-                self.sim_th[bmu_ind] += 1*self.alphas[bmu_ind] * (max_sim - self.sim_th[bmu_ind] - self.eps)
+                self.sim_th[bmu_ind] = self.sim_th[bmu_ind] + (1*max_sim - self.sim_th[bmu_ind]) / self.sim_th_tau_crr
                 
                 self.hits[bmu_ind]+=1
                 self.alphas[bmu_ind] = self.misses[bmu_ind]/self.hits[bmu_ind]
@@ -242,7 +256,9 @@ class CLP(SupervisedTemplate):
                 self.prototypes[bmu_ind] += self.alphas[bmu_ind] * error
                 
                 # update the threshold towards max_sim-eps
-                self.sim_th[bmu_ind] += 0.3*self.alphas[bmu_ind] * (max_sim - self.sim_th[bmu_ind] - self.eps)
+                # self.sim_th[bmu_ind] += 0.3*self.alphas[bmu_ind] * (max_sim - self.sim_th[bmu_ind] - self.eps)
+                # self.sim_th[bmu_ind] += 0.008 * (max_sim - self.sim_th[bmu_ind] - self.eps)
+                self.sim_th[bmu_ind] = self.sim_th[bmu_ind] + (0.70*max_sim - self.sim_th[bmu_ind]) / self.sim_th_tau_crr             
                 
                 self.hits[bmu_ind]+=self.k_hit
                 self.alphas[bmu_ind] = self.misses[bmu_ind]/self.hits[bmu_ind]
@@ -255,27 +271,27 @@ class CLP(SupervisedTemplate):
                 # print("Mistake")
                 mistake = True
                 n_mistakes += 1
-                if self.verbose >= 1:
-                    print("Mistaken prototype:", self.proto_labels[bmu_ind], bmu_ind)
+                
                 self.mistaken_proto_inds.append(bmu_ind)
                 self.prototypes[bmu_ind] -= self.alphas[bmu_ind] * error
                 
                 # update the threshold towards max_sim+eps
-                self.sim_th[bmu_ind] += self.alphas[bmu_ind] * (max_sim - self.sim_th[bmu_ind] + self.eps)
+                # self.sim_th[bmu_ind] += 4*self.alphas[bmu_ind] * (max_sim - self.sim_th[bmu_ind] + self.eps)
+                self.sim_th[bmu_ind] = self.sim_th[bmu_ind] + (1*max_sim - self.sim_th[bmu_ind]) / self.sim_th_tau_err
+                
                 
                 self.misses[bmu_ind] += self.k_miss
                 self.alphas[bmu_ind] = self.misses[bmu_ind]/self.hits[bmu_ind]
                 
+                if self.verbose >= 1:
+                    print("Mistaken prototype:", self.proto_labels[bmu_ind].item(), bmu_ind)
+                    print("sim_th & alpha:", self.sim_th[bmu_ind].item(), self.alphas[bmu_ind].item())
+                
                 # If more misses than hits, then forget this prototype, reset it
                 if self.alphas[bmu_ind] > 1: 
-                    self.proto_labels[bmu_ind] = self.num_classes
-                    self.alphas[bmu_ind] = self.alpha_start
-                    self.hits[bmu_ind], self.misses[bmu_ind] = 1, 1
-                    
+                    self._forget(bmu_ind)
                 
-                # self._bound_weights(bmu_ind)
-
-
+                # Try again if you have not checked all top matches
                 if n_mistakes < self.max_allowed_mistakes:
                     # print("First Mistake trying again...")
                     continue
@@ -305,18 +321,16 @@ class CLP(SupervisedTemplate):
         self.alphas[bmu_ind] = self.misses[bmu_ind]/self.hits[bmu_ind]
         # self._bound_weights(bmu_ind)
     
-    def _bound_weights(self, bmu_ind):
-        over_w_max_inds = (self.prototypes[bmu_ind] > self.w_max)
-        below_w_min_inds = (self.prototypes[bmu_ind] < self.w_min)
+    def _forget(self, proto_ind):
+        self.proto_labels[proto_ind] = self.num_classes
+        self.alphas[proto_ind] = self.alpha_start
+        self.hits[proto_ind], self.misses[proto_ind] = 1, 1
         
-        if torch.count_nonzero(over_w_max_inds) > 0:
-            inds = over_w_max_inds.nonzero().squeeze()
-            print(inds)
-            self.prototypes[bmu_ind][inds] = self.w_max
-        if torch.count_nonzero(below_w_min_inds) > 0:    
-            inds = below_w_min_inds.nonzero().squeeze()
-            print(inds)
-            self.prototypes[bmu_ind][inds] = self.w_min
+    def memory_cleanup(self, alpha_th=0.5):
+        pt_inds_to_clean = (self.alphas >= alpha_th)
+        self.proto_labels[pt_inds_to_clean] = self.num_classes
+        self.alphas[pt_inds_to_clean] = self.alpha_start
+        self.hits[pt_inds_to_clean], self.misses[pt_inds_to_clean] = 1, 1
         
     @torch.no_grad()
     def predict(self, x):
@@ -344,21 +358,52 @@ class CLP(SupervisedTemplate):
         ind = 0
         
         similarities = self._calc_similarities(x)
+        similarities[self.mistaken_proto_inds] -= 10000
         sims = similarities.clone().detach()
-        top_sims, top_inds = torch.sort(sims, 0, descending=True)
-        top_sims, top_inds = top_sims[:8,0], top_inds[:8,0]
+        
+        th_passing_check  = torch.gt(sims, self.sim_th.tile((1, sims.shape[1])))
+        sims_sorted, inds_sorted = torch.sort(sims, 0, descending=True)
+        th_passing_sorted = torch.gather(th_passing_check, 0, inds_sorted)
+        
+        bmu_inds = torch.zeros(size=(1, sims.shape[1]))
+        max_sims = torch.zeros(size=(1, sims.shape[1]))
+        
+        for i in range(sims.shape[1]):
+            top_th_passing_inds = inds_sorted[th_passing_sorted[:,i],i]
+            max_th_passing_sims = sims_sorted[th_passing_sorted[:,i],i]
+            if len(top_th_passing_inds) > 0:
+                bmu_inds[0,i] = top_th_passing_inds[0]
+                max_sims[0,i] = max_th_passing_sims[0]
+            else:
+                bmu_inds[0,i] = -1
+                max_sims[0,i] = 0
+        
+#         top_sims, top_inds = torch.sort(sims, 0, descending=True)
+#         th_passing_check, max_th_passing_inds  = torch.max(torch.gt(top_sims, self.sim_th[top_inds].squeeze(2)), dim=0, keepdim=True)
+        
+#         bmu_inds = torch.gather(top_inds, 0, max_th_passing_inds.T)
+#         max_sim = torch.gather(similarities, 0, bmu_inds).squeeze()
+        
+#         # Unknown
+#         bmu_inds[th_passing_check.squeeze()==False] = -1
+#         bmu_inds = bmu_inds.squeeze()
+        inds_sorted = inds_sorted.long()
+        top_sims, top_inds = sims_sorted[:5,:], inds_sorted[:5,:]
         # print(top_sims.shape, top_inds.shape)
         if self.verbose == 2:
-            print("-----------------------------------------------------------")
-            print("sims:  ",top_sims.t().data)
-            print("simth: ",self.sim_th[top_inds].t().data)
-            print("labels:",self.proto_labels[top_inds].t().data)
-            print("alphas:",self.alphas[top_inds].t().data)
+            for i in range(0,top_sims.shape[1], 3): 
+                print("-----------------------------------------------------------")
+                print("sims:  ",top_sims[:,i].t().data)
+                print("simth: ",self.sim_th[top_inds[:,i]].t().data)
+                print("labels:",self.proto_labels[top_inds[:,i]].t().data)
+                print("alphas:",self.alphas[top_inds[:,i]].t().data)
         
-        similarities[self.mistaken_proto_inds] -= 10000
-        (max_sim, bmu_inds) = torch.max(similarities, dim=0, keepdim=False)
-        bmu_inds[torch.gt(self.sim_th[bmu_inds].flatten(), max_sim)==True] = -1
-        return bmu_inds, max_sim
+        bmu_inds = bmu_inds.squeeze()
+        max_sims = max_sims.squeeze()
+        
+        # (max_sim, bmu_inds) = torch.max(similarities, dim=0, keepdim=False)
+        # bmu_inds[torch.gt(self.sim_th[bmu_inds].flatten(), max_sim)==True] = -1
+        return bmu_inds.long(), max_sims
             
 #         if self.bmu_metric == 'euclidean':
 #             euc_dist = torch.cdist(self.prototypes, x, p=2)
