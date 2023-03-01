@@ -36,6 +36,7 @@ class WRGBD(Dataset):
         self.view_targets = []
         self.pose_targets = []
         self.cat_names = []
+        self.obj_names = []
         
         self.n_obj_per_cat = []
         
@@ -63,7 +64,7 @@ class WRGBD(Dataset):
                 obj_dirs = glob.glob(cat_dir+"*/")
                 
                 for obj_dir in obj_dirs:
-                    
+                    self.obj_names.append(obj_dir.split("/")[-2])
                     files = glob.glob(obj_dir+"**/*_crop.png", recursive=True)
                     
                     for file in files:
