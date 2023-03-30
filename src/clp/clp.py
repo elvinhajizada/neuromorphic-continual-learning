@@ -99,6 +99,7 @@ class CLP(SupervisedTemplate):
         
         # CLVQ parameters
         self.bmu_metric = bmu_metric
+        self.n_protos = n_protos
         self.alpha_start = alpha_start
         self.max_allowed_mistakes = max_allowed_mistakes
         self.num_classes = num_classes
@@ -110,7 +111,6 @@ class CLP(SupervisedTemplate):
         self.eps = eps
         
         # setup weights for CLVQ
-        self.n_protos = n_protos
         self.prototypes = 100*torch.ones(n_protos, input_size).to(self.device)
         self.proto_labels = num_classes * torch.ones((n_protos, 1), dtype=int)
         self.alphas = self.alpha_start*torch.ones((n_protos, 1)).to(self.device)
@@ -118,7 +118,6 @@ class CLP(SupervisedTemplate):
         self.hits = torch.ones((n_protos, 1)).to(self.device)
         self.misses = torch.ones((n_protos, 1)).to(self.device)
         self.n_alc_bc_miss = 0    # Num of allocated protos because of errors
-        self.sims = []
         self.seen_labels = []
         self.mistaken_proto_inds = [] # inds of protos that made incorrect inferences for current sample
 
