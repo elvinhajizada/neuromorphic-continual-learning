@@ -1,0 +1,9 @@
+'alpha_init': 0.6328349432670644,
+ 'sim_th_init': 0.4418989359672658,
+ 'max_allowed_mistakes': 6,
+ 'k_hit': 1.3567821972273952,
+ 'k_miss': 0.01601660598805843,
+ 'tau_sim_th_pos': 169,
+ 'tau_sim_th_neg': 126,
+ 'k_sim_th_pos': 0.7703281112418332,
+ 'k_sim_th_neg': 0.8814284165050081
