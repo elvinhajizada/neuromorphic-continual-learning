@@ -42,31 +42,45 @@ class CLP(BaseEstimator, ClassifierMixin):
         self.device = device
         self.verbose = verbose
         
-    def fit(self, X, y):
-        y = y.cpu()
-        n_samples, n_features = X.shape
-        
-        self.prototypes_ = 1*torch.ones(self.n_protos, n_features).to(self.device)
-        self.proto_labels_ = self.num_classes * torch.ones((self.n_protos, 1), dtype=int)
+        self.proto_labels_ = self.num_classes * torch.ones((self.n_protos, 1), dtype=int).float().to(self.device)
         self.alphas_ = self.alpha_init*torch.ones((self.n_protos, 1)).to(self.device)
         self.sim_th_ = self.sim_th_init*torch.ones((self.n_protos, 1)).to(self.device)
         self.hits_ = torch.ones((self.n_protos, 1)).to(self.device)
         self.misses_ = torch.ones((self.n_protos, 1)).to(self.device)
         self.n_ignored_inst_ = 0    # Num of ignored instances
         self.classes_ = [self.num_classes]  # "Unknown" class already in the list
+        self.next_alloc_id_ = 0
+        self.is_protos_initialized = False
         
-        for x, y in zip(X, y):
-            
+    def fit(self, X, y):
+        
+        for x, y in zip(X, y):  
+            self.partial_fit(x[None,:],y)
+        
+    def partial_fit(self, X, y, classes=None): 
+        # print("Fitting...")
+        
+        # y = y.cpu()
+        # print("label:", y)
+
+        if not self.is_protos_initialized:
+            n_features = X.shape[1]
+            self.prototypes_ = torch.zeros(self.n_protos, n_features).to(self.device)
+            self.is_protos_initialized = True
+        
+        for x, y in zip(X, y):  
+            x = x[None,:]
+
             self.mistaken_proto_inds_ = [] # inds of protos that made incorrect inferences for current sample
-            
-            if self.sim_metric == 'cosine': # normalize x, if we use cosine similarity
-                x = x / norm(x, 2)
-                
             n_mistakes = 0
-            y = torch.tensor(int(y))    
-            
+            y = torch.tensor(y).float()
+            x = torch.tensor(x).float()
+
+            if self.sim_metric == 'dot_product': # normalize x, if we use dot product similarity
+                x = x / norm(x, 2)
+
             while True:
-                
+
                 bmu_ind, max_sim = self._get_best_matching_unit(x)
                 bmu_ind = bmu_ind.item()
                 max_sim = max_sim.item()
@@ -84,49 +98,50 @@ class CLP(BaseEstimator, ClassifierMixin):
                     if self.verbose >= 1:
                         print("Novel Instance!")
                         print(max_sim, bmu_ind)
-                    self._allocate(x, y)
+                    self._allocate(x, y)         
                     break
 
                 # Get the winner prototype
-                bmu = self.prototypes_[bmu_ind]
+                bmu = self.prototypes_[[bmu_ind]]
 
                 # Calculate Error
                 if self.sim_metric == 'euclidean':
                     error = x - bmu
 
-                elif self.sim_metric == 'cosine':
+                elif self.sim_metric == 'dot_product':
                     error = x
 
                 # If winner not assigned to a label, then assign it to
                 # the training instance's label
-                if self.proto_labels_[bmu_ind] == self.num_classes:
+                if self.proto_labels_[[bmu_ind]] == self.num_classes:
                     if self.verbose >= 1:
                         print("Unsupervised allocating...")
-                    self.proto_labels_[bmu_ind] = y
-                    self.prototypes_[bmu_ind] += self.alphas_[bmu_ind] * error
+                    self.proto_labels_[[bmu_ind]] = y
+                    self.prototypes_[[bmu_ind]] += self.alphas_[[bmu_ind]] * error
+                    self.prototypes_[[bmu_ind]] = self.prototypes_[[bmu_ind]]/torch.norm(self.prototypes_[[bmu_ind]], p=2)
 
                     # update the threshold towards max_sim-eps
-                    self.sim_th_[bmu_ind] = self.sim_th_[bmu_ind] + \
-                    (self.k_sim_th_pos*max_sim - self.sim_th_[bmu_ind]) / self.tau_sim_th_pos
+                    self.sim_th_[[bmu_ind]] = self.sim_th_[[bmu_ind]] + \
+                    (self.k_sim_th_pos*max_sim - self.sim_th_[[bmu_ind]]) / self.tau_sim_th_pos
 
-                    self.hits_[bmu_ind]+=1
-                    self.alphas_[bmu_ind] = self.misses_[bmu_ind]/self.hits_[bmu_ind]
+                    self.hits_[[bmu_ind]]+=1
+                    self.alphas_[[bmu_ind]] = self.misses_[[bmu_ind]]/self.hits_[[bmu_ind]]
                     break
 
                 # Update the winner based on its inference
                 # If CORRECT prediction
-                elif self.proto_labels_[bmu_ind] == y:
+                elif self.proto_labels_[[bmu_ind]] == y:
                     if self.verbose == 2:
                         print("Correct")
-                        
-                    self.prototypes_[bmu_ind] += self.alphas_[bmu_ind] * error
 
+                    self.prototypes_[[bmu_ind]] += self.alphas_[[bmu_ind]] * error
+                    self.prototypes_[[bmu_ind]] = self.prototypes_[[bmu_ind]]/torch.norm(self.prototypes_[[bmu_ind]], p=2)
                     # update the threshold towards max_sim-eps
-                    self.sim_th_[bmu_ind] = self.sim_th_[bmu_ind] + \
-                    (self.k_sim_th_pos*max_sim - self.sim_th_[bmu_ind]) / self.tau_sim_th_pos             
+                    self.sim_th_[[bmu_ind]] = self.sim_th_[[bmu_ind]] + \
+                    (self.k_sim_th_pos*max_sim - self.sim_th_[[bmu_ind]]) / self.tau_sim_th_pos             
 
-                    self.hits_[bmu_ind] += self.k_hit
-                    self.alphas_[bmu_ind] = self.misses_[bmu_ind]/self.hits_[bmu_ind]
+                    self.hits_[[bmu_ind]] += self.k_hit
+                    self.alphas_[[bmu_ind]] = self.misses_[[bmu_ind]]/self.hits_[[bmu_ind]]
                     # self._bound_weights(bmu_ind)
                     break
 
@@ -136,22 +151,23 @@ class CLP(BaseEstimator, ClassifierMixin):
 
                     self.mistaken_proto_inds_.append(bmu_ind)
                     # update the mistaken prototype
-                    self.prototypes_[bmu_ind] -= self.alphas_[bmu_ind] * error
+                    self.prototypes_[[bmu_ind]] -= self.alphas_[[bmu_ind]] * error
+                    self.prototypes_[[bmu_ind]] = self.prototypes_[[bmu_ind]]/torch.norm(self.prototypes_[[bmu_ind]], p=2)
 
                     # update the threshold of this prototype
-                    self.sim_th_[bmu_ind] = self.sim_th_[bmu_ind] + \
-                    (self.k_sim_th_neg*max_sim - self.sim_th_[bmu_ind]) / self.tau_sim_th_neg
+                    self.sim_th_[[bmu_ind]] = self.sim_th_[[bmu_ind]] + \
+                    (self.k_sim_th_neg*max_sim - self.sim_th_[[bmu_ind]]) / self.tau_sim_th_neg
 
 
-                    self.misses_[bmu_ind] += self.k_miss
-                    self.alphas_[bmu_ind] = self.misses_[bmu_ind]/self.hits_[bmu_ind]
+                    self.misses_[[bmu_ind]] += self.k_miss
+                    self.alphas_[[bmu_ind]] = self.misses_[[bmu_ind]]/self.hits_[[bmu_ind]]
 
                     if self.verbose >= 1:
-                        print("Mistaken prototype:", self.proto_labels_[bmu_ind].item(), bmu_ind)
-                        print("sim_th & alpha:", self.sim_th_[bmu_ind].item(), self.alphas_[bmu_ind].item())
+                        print("Mistaken prototype:", self.proto_labels_[[bmu_ind]].item(), bmu_ind)
+                        print("sim_th & alpha:", self.sim_th_[[bmu_ind]].item(), self.alphas_[[bmu_ind]].item())
 
                     # If more misses than hits, then forget this prototype, reset it
-                    # if self.alphas_[bmu_ind] > 1: 
+                    # if self.alphas_[[bmu_ind]] > 1: 
                     #     self._forget(bmu_ind)
 
                     # Try again if you have not checked all top matches
@@ -178,22 +194,22 @@ class CLP(BaseEstimator, ClassifierMixin):
         of predictions returned
         :return: the test predictions or probabilities
         """
-
+        
+        # print("Predicting...")
         # Compute the winner prototype, return this and its index
         bmu_inds, _ = self._get_best_matching_unit(x) 
         # Find the predicted labels
         preds = self.proto_labels_[bmu_inds]
         # Infer "Unknown Instance" label (as label == n_classes) as predictions
         preds[bmu_inds==-1] = self.num_classes
-        
         # return predictions
+        # print("Inference: ", preds)
         return np.array(preds.cpu())
     
     # Locate the best matching unit
     def _get_best_matching_unit(self, x):
 
         ind = 0
-        
         similarities = self._calc_similarities(x)
         similarities[self.mistaken_proto_inds_] -= 10000
         sims = similarities.clone().detach()
@@ -234,10 +250,11 @@ class CLP(BaseEstimator, ClassifierMixin):
     def _calc_similarities(self, x):
         
         similarities = 0
+        x = torch.tensor(x).float()
         
         if len(x.shape) == 1:
             x = x.unsqueeze(dim=0)
-
+            
         if self.sim_metric == 'euclidean':
             similarities = -torch.cdist(self.prototypes_, x, p=2)
             
@@ -246,22 +263,20 @@ class CLP(BaseEstimator, ClassifierMixin):
             
         elif self.sim_metric == 'cosine':
             similarities = pairwise_cosine_similarity(self.prototypes_, x)
-            
         return similarities
 
     def _allocate (self, x, y):
         # print("Mistake again, allocating...")
-        similarities = self._calc_similarities(x)
-        similarities[self.proto_labels_<self.num_classes] -= 100000
+        bmu_ind = self.next_alloc_id_
+        self.proto_labels_[[bmu_ind]] = y
         
-        bmu_ind = torch.argmax(similarities, dim=0)
-        self.proto_labels_[bmu_ind] = y
-        
-        error = x - self.prototypes_[bmu_ind]
-        self.prototypes_[bmu_ind] += self.alphas_[bmu_ind] * error
+        error = x - self.prototypes_[[bmu_ind]]
+        self.prototypes_[[bmu_ind]] += self.alphas_[[bmu_ind]] * error
+        self.prototypes_[[bmu_ind]] = self.prototypes_[[bmu_ind]]/torch.norm(self.prototypes_[[bmu_ind]], p=2)
             
-        self.hits_[bmu_ind]+=1
-        self.alphas_[bmu_ind] = self.misses_[bmu_ind]/self.hits_[bmu_ind]
+        self.hits_[[bmu_ind]]+=1
+        self.alphas_[[bmu_ind]] = self.misses_[[bmu_ind]]/self.hits_[[bmu_ind]]
+        self.next_alloc_id_ += 1
     
     def init_prototypes_from_data(self, data):
         
