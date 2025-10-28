@@ -49,19 +49,20 @@ class Coil100Dataset(Dataset):
         self.targets = self.targets[:72*n_classes]
         self.paths = self.paths[obj_slices]
         
-        train_indices, test_indices, _, _ = train_test_split(
-            range(len(self.targets)),
-            self.targets,
-            stratify=self.targets,
-            test_size=test_size,
-            random_state=seed,
-            shuffle=True)
-        if train:
-            self.targets = self.targets[train_indices]
-            self.paths = self.paths[train_indices]
-        else:
-            self.targets = self.targets[test_indices]
-            self.paths = self.paths[test_indices]
+        if test_size is not None:
+            train_indices, test_indices, _, _ = train_test_split(
+                range(len(self.targets)),
+                self.targets,
+                stratify=self.targets,
+                test_size=test_size,
+                random_state=seed,
+                shuffle=True)
+            if train:
+                self.targets = self.targets[train_indices]
+                self.paths = self.paths[train_indices]
+            else:
+                self.targets = self.targets[test_indices]
+                self.paths = self.paths[test_indices]
 
     def __len__(self):
         return len(self.targets)

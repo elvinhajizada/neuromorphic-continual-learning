@@ -1,10 +1,8 @@
 from sklearn.base import BaseEstimator, ClassifierMixin
 import numpy as np
-import os
 
 import torch
 from torchmetrics.functional import pairwise_cosine_similarity
-from torch.nn.functional import one_hot
 from torch.linalg import norm
 torch.set_printoptions(precision=2)
 
@@ -13,7 +11,7 @@ class CLP(BaseEstimator, ClassifierMixin):
     def __init__(
         self, 
         sim_metric='cosine',
-        n_protos=10,
+        n_protos=100,
         num_classes=2,
         alpha_init=1,
         sim_th_init=0.5, 
@@ -97,7 +95,7 @@ class CLP(BaseEstimator, ClassifierMixin):
                 if bmu_ind == -1:
                     if self.verbose >= 1:
                         print("Novel Instance!")
-                        print(max_sim, bmu_ind)
+                        print("Label", y)
                     self._allocate(x, y)         
                     break
 
@@ -117,15 +115,15 @@ class CLP(BaseEstimator, ClassifierMixin):
                     if self.verbose >= 1:
                         print("Unsupervised allocating...")
                     self.proto_labels_[[bmu_ind]] = y
-                    self.prototypes_[[bmu_ind]] += self.alphas_[[bmu_ind]] * error
-                    self.prototypes_[[bmu_ind]] = self.prototypes_[[bmu_ind]]/torch.norm(self.prototypes_[[bmu_ind]], p=2)
+                    # self.prototypes_[[bmu_ind]] += self.alphas_[[bmu_ind]] * error
+                    # self.prototypes_[[bmu_ind]] = self.prototypes_[[bmu_ind]]/torch.norm(self.prototypes_[[bmu_ind]], p=2)
 
                     # update the threshold towards max_sim-eps
-                    self.sim_th_[[bmu_ind]] = self.sim_th_[[bmu_ind]] + \
-                    (self.k_sim_th_pos*max_sim - self.sim_th_[[bmu_ind]]) / self.tau_sim_th_pos
+                    # self.sim_th_[[bmu_ind]] = self.sim_th_[[bmu_ind]] + \
+                    # (self.k_sim_th_pos*max_sim - self.sim_th_[[bmu_ind]]) / self.tau_sim_th_pos
 
                     self.hits_[[bmu_ind]]+=1
-                    self.alphas_[[bmu_ind]] = self.misses_[[bmu_ind]]/self.hits_[[bmu_ind]]
+                    # self.alphas_[[bmu_ind]] = self.alpha_init/self.hits_[[bmu_ind]]
                     break
 
                 # Update the winner based on its inference
@@ -134,14 +132,14 @@ class CLP(BaseEstimator, ClassifierMixin):
                     if self.verbose == 2:
                         print("Correct")
 
-                    self.prototypes_[[bmu_ind]] += self.alphas_[[bmu_ind]] * error
-                    self.prototypes_[[bmu_ind]] = self.prototypes_[[bmu_ind]]/torch.norm(self.prototypes_[[bmu_ind]], p=2)
+                    # self.prototypes_[[bmu_ind]] += self.alphas_[[bmu_ind]] * error
+                    # self.prototypes_[[bmu_ind]] = self.prototypes_[[bmu_ind]]/torch.norm(self.prototypes_[[bmu_ind]], p=2)
                     # update the threshold towards max_sim-eps
-                    self.sim_th_[[bmu_ind]] = self.sim_th_[[bmu_ind]] + \
-                    (self.k_sim_th_pos*max_sim - self.sim_th_[[bmu_ind]]) / self.tau_sim_th_pos             
+                    # self.sim_th_[[bmu_ind]] = self.sim_th_[[bmu_ind]] + \
+                    # (self.k_sim_th_pos*max_sim - self.sim_th_[[bmu_ind]]) / self.tau_sim_th_pos             
 
-                    self.hits_[[bmu_ind]] += self.k_hit
-                    self.alphas_[[bmu_ind]] = self.misses_[[bmu_ind]]/self.hits_[[bmu_ind]]
+                    self.hits_[[bmu_ind]] += 1
+                    # self.alphas_[[bmu_ind]] = self.alpha_init / self.hits_[[bmu_ind]]
                     # self._bound_weights(bmu_ind)
                     break
 
@@ -151,19 +149,19 @@ class CLP(BaseEstimator, ClassifierMixin):
 
                     self.mistaken_proto_inds_.append(bmu_ind)
                     # update the mistaken prototype
-                    self.prototypes_[[bmu_ind]] -= self.alphas_[[bmu_ind]] * error
-                    self.prototypes_[[bmu_ind]] = self.prototypes_[[bmu_ind]]/torch.norm(self.prototypes_[[bmu_ind]], p=2)
+                    # self.prototypes_[[bmu_ind]] -= self.alphas_[[bmu_ind]] * error
+                    # self.prototypes_[[bmu_ind]] = self.prototypes_[[bmu_ind]]/torch.norm(self.prototypes_[[bmu_ind]], p=2)
 
                     # update the threshold of this prototype
-                    self.sim_th_[[bmu_ind]] = self.sim_th_[[bmu_ind]] + \
-                    (self.k_sim_th_neg*max_sim - self.sim_th_[[bmu_ind]]) / self.tau_sim_th_neg
+                    # self.sim_th_[[bmu_ind]] = self.sim_th_[[bmu_ind]] + \
+                    # (self.k_sim_th_neg*max_sim - self.sim_th_[[bmu_ind]]) / self.tau_sim_th_neg
 
 
                     self.misses_[[bmu_ind]] += self.k_miss
-                    self.alphas_[[bmu_ind]] = self.misses_[[bmu_ind]]/self.hits_[[bmu_ind]]
+                    # self.alphas_[[bmu_ind]] = self.misses_[[bmu_ind]]/self.hits_[[bmu_ind]]
 
                     if self.verbose >= 1:
-                        print("Mistaken prototype:", self.proto_labels_[[bmu_ind]].item(), bmu_ind)
+                        print("Predicted:", self.proto_labels_[[bmu_ind]].item(), " Actual: ",y)
                         print("sim_th & alpha:", self.sim_th_[[bmu_ind]].item(), self.alphas_[[bmu_ind]].item())
 
                     # If more misses than hits, then forget this prototype, reset it
@@ -250,7 +248,10 @@ class CLP(BaseEstimator, ClassifierMixin):
     def _calc_similarities(self, x):
         
         similarities = 0
-        x = torch.tensor(x).float()
+        if isinstance(x ,np.ndarray):
+            x = torch.from_numpy(x)
+        
+        x = x.float()
         
         if len(x.shape) == 1:
             x = x.unsqueeze(dim=0)
@@ -275,8 +276,8 @@ class CLP(BaseEstimator, ClassifierMixin):
         self.prototypes_[[bmu_ind]] = self.prototypes_[[bmu_ind]]/torch.norm(self.prototypes_[[bmu_ind]], p=2)
             
         self.hits_[[bmu_ind]]+=1
-        self.alphas_[[bmu_ind]] = self.misses_[[bmu_ind]]/self.hits_[[bmu_ind]]
-        self.next_alloc_id_ += 1
+        # self.alphas_[[bmu_ind]] = self.alpha_init / self.hits_[[bmu_ind]]
+        self.next_alloc_id_ = min(self.next_alloc_id_+1, self.n_protos-1)
     
     def init_prototypes_from_data(self, data):
         
